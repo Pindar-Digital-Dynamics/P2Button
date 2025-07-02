@@ -1,32 +1,81 @@
-# Prerequisites
-*.d
+# Arduino build files
+*.ino.*
+*.elf
+*.bin
+*.hex
+*.eep
 
-# Compiled Object files
-*.slo
-*.lo
+# Arduino IDE files
+*.sublime-workspace
+*.sublime-project
+*.vscode/
+*.code-workspace
+
+# Compiled object files
 *.o
 *.obj
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Compiled Dynamic libraries
+*.d
+*.a
 *.so
 *.dylib
 *.dll
 
-# Fortran module files
-*.mod
-*.smod
+# Precompiled headers
+*.gch
+*.pch
 
-# Compiled Static libraries
+# Static and dynamic libraries
+*.lib
 *.lai
 *.la
-*.a
-*.lib
 
 # Executables
 *.exe
 *.out
 *.app
+
+# Core dumps
+core.*
+
+# Mac system files
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+Icon?
+
+# EEPROM files
+*.eep
+
+# Arduino backup files
+*~
+*.bak
+
+# Arduino libraries (if you add them locally)
+libraries/
+
+# Build folders (Arduino CLI, PlatformIO, etc.)
+build/
+.pio/
+.pioenvs/
+.pio/libdeps/
+.pio/build/
+
+# Logs
+*.log
+
+# Sketchbook autosave
+*.autosave
+
+# Node modules (if any web or JS tooling is used)
+node_modules/
+
+# Python cache (if any scripts)
+__pycache__/
+*.pyc
+
+# Ignore firmware images
+*.img
+*.map
+
+# Ignore generated documentation
