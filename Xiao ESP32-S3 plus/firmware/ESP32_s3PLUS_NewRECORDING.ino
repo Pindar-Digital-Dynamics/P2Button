@@ -15,7 +15,7 @@
 #include <Wire.h>
 #include <Arduino_GFX_Library.h>
 #include <lvgl.h>
-#include <ui_headers/ui.h>
+#include <ui.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
@@ -88,7 +88,8 @@ static TimerHandle_t buttonTimeoutTimer;
 static TimerHandle_t systemWatchdogTimer;
 static TimerHandle_t loginScreenTimer;
 static TimerHandle_t logoSwitchTimer;
-
+static TimerHandle_t holdToUploadTimer;
+static TimerHandle_t logoPopupTimer;
 
 //========================================================================================
 // STATE MACHINE DEFINITIONS
@@ -120,15 +121,6 @@ typedef enum {
 } SystemEvent_t;
 
 typedef enum {
-    UI_CMD_LOAD_SCREEN = 0,
-    UI_CMD_SHOW_MESSAGE,
-    UI_CMD_START_ANIMATION,
-    UI_CMD_STOP_ANIMATION,
-    UI_CMD_UPDATE_PROGRESS,
-    UI_CMD_CLEAR_SCREEN
-} UICommand_t;
-
-typedef enum {
     ANIM_NONE = 0,
     ANIM_PULSE,
     ANIM_ROTATE,
@@ -136,6 +128,16 @@ typedef enum {
     ANIM_SHAKE
 } AnimationType_t;
 
+typedef enum {
+    UI_CMD_LOAD_SCREEN = 0,
+    UI_CMD_SHOW_MESSAGE,
+    UI_CMD_START_ANIMATION,
+    UI_CMD_STOP_ANIMATION,
+    UI_CMD_UPDATE_PROGRESS,
+    UI_CMD_CLEAR_SCREEN,
+    UI_CMD_SHOW_POPUP,          // NEW: Show notification popup
+    UI_CMD_HIDE_POPUP           // NEW: Hide notification popup
+} UICommand_t;
 //========================================================================================
 // DATA STRUCTURES
 //========================================================================================
@@ -263,6 +265,12 @@ static lv_color_t buf1[GC9A01_WIDTH * 10];
 static lv_color_t buf2[GC9A01_WIDTH * 10];
 static lv_disp_drv_t disp_drv;
 
+
+// Error handler
+static lv_obj_t* globalPopupContainer = nullptr;
+static lv_obj_t* globalPopupLabel = nullptr;
+static bool popupActive = false;
+
 //========================================================================================
 // BLE CONFIGURATION
 //========================================================================================
@@ -376,6 +384,14 @@ void sendBLEButtonIndicationBurst(SystemState_t state, int repeats, int spacing_
 void startAppCmdSuppression(SystemState_t state, uint32_t duration_ms);
 bool isAppCmdSuppressed(SystemState_t state);
 
+// Add these to your function prototypes section
+void sendBLEButtonIndicationBurstNoTransition(SystemState_t currentState, int repeats, int spacing_ms);
+void sendBLEButtonIndicationOnly(SystemState_t targetState);
+
+
+// Call back functon of timer Recoridng state
+void holdToUploadTimerCallback(TimerHandle_t xTimer);
+void logoPopupTimerCallback(TimerHandle_t xTimer);
 
 //========================================================================================
 // BLE CALLBACKS
@@ -383,26 +399,55 @@ bool isAppCmdSuppressed(SystemState_t state);
 class SystemBLEServerCallbacks : public BLEServerCallbacks {
 public:
     void onConnect(BLEServer* pServer) override {
-        logSystemEvent("BLE", "Client connected");
+        logSystemEvent("BLE", "Client attempting connection...");
+        
+        // Check if this is first connection after reset
+        esp_reset_reason_t reset_reason = esp_reset_reason();
+        bool isFirstConnectionAfterReset = (reset_reason == ESP_RST_POWERON || 
+                                        reset_reason == ESP_RST_SW || 
+                                        reset_reason == ESP_RST_PANIC || 
+                                        reset_reason == ESP_RST_UNKNOWN) && 
+                                        (bleHealth.totalIndicationsSent == 0);
+        
+        if (isFirstConnectionAfterReset) {
+            logSystemEvent("BLE", "🔄 FIRST CONNECTION AFTER RESET - Using extended stabilization");
+            // Extra long delay for first connection after reset
+            vTaskDelay(pdMS_TO_TICKS(1000)); // 1 second extra delay
+        } else {
+            // Normal connection delay
+            vTaskDelay(pdMS_TO_TICKS(500)); 
+        }
+        
+        logSystemEvent("BLE", "✅ Client connected successfully");
         xEventGroupSetBits(systemEvents, BLE_CONNECTED);
         
         // Update BLE connection health
         bleHealth.isConnected = true;
         bleHealth.connectionTime = xTaskGetTickCount();
-        bleHealth.connectionStable = false; // Not stable yet, needs time
         bleHealth.indicationFailureCount = 0;
+        
+        // CRITICAL: For first connection, mark as stable immediately after delay
+        if (isFirstConnectionAfterReset) {
+            bleHealth.connectionStable = true; // Override stability check for first connection
+            logSystemEvent("BLE", "🚀 First connection stabilized with extended delay");
+        } else {
+            bleHealth.connectionStable = false; // Will stabilize after normal delay
+            // Additional delay for connection to stabilize
+            vTaskDelay(pdMS_TO_TICKS(300));
+            bleHealth.connectionStable = true;
+            logSystemEvent("BLE", "Connection stabilized normally");
+        }
         
         SystemEventMsg_t event = {
             .event = EVENT_BLE_CONNECTED,
-            .targetState = STATE_LOGIN,
-            .param1 = 0,
+            .targetState = STATE_LOGO,
+            .param1 = isFirstConnectionAfterReset ? 1 : 0, // Flag first connection
             .param2 = 0,
             .timestamp = xTaskGetTickCount()
         };
-        strcpy(event.data, "BLE_CONNECT");
+        strcpy(event.data, isFirstConnectionAfterReset ? "FIRST_BLE_CONNECT" : "BLE_CONNECT");
         xQueueSend(systemEventQueue, &event, pdMS_TO_TICKS(100));
     }
-
     void onDisconnect(BLEServer* pServer) override {
         logSystemEvent("BLE", "Client disconnected");
         xEventGroupClearBits(systemEvents, BLE_CONNECTED);
@@ -475,7 +520,15 @@ void logoSwitchTimerCallback(TimerHandle_t xTimer) {
 void setup() {
     Serial.begin(115200);
     delay(1000);
+    esp_reset_reason_t reset_reason = esp_reset_reason();
+    if (reset_reason != ESP_RST_DEEPSLEEP) {
+        logSystemEvent("SYSTEM", "Fresh boot/reset detected");
+        // Set a flag that BLE needs extra stabilization time
+        bleHealth.connectionStable = false;
+        bleHealth.indicationFailureCount = 0;
+    }
     
+    logSystemEvent("SYSTEM", "=== P2CAM Multi-Core System Starting ===");
     logSystemEvent("SYSTEM", "=== P2CAM Multi-Core System Starting ===");
                             String heapMessage = "Free heap: " + String(ESP.getFreeHeap()) + " bytes";
                         logSystemEvent("SYSTEM", heapMessage.c_str());
@@ -511,9 +564,27 @@ void setup() {
                                (void*)0, loginScreenTimerCallback);                                
     logoSwitchTimer = xTimerCreate("LogoSwitch", pdMS_TO_TICKS(3000), pdTRUE, (void*)0, logoSwitchTimerCallback);
 
+    holdToUploadTimer = xTimerCreate("HoldToUpload", pdMS_TO_TICKS(4000), pdFALSE,
+                                    (void*)0, holdToUploadTimerCallback);
+                                        
+    logoPopupTimer = xTimerCreate("LogoPopup", pdMS_TO_TICKS(3000), pdFALSE,(void*)0, logoPopupTimerCallback);
     // Initialize hardware
     initializeHardware();
+    logSystemEvent("SYSTEM", "Preparing BLE for first-time connection...");
 
+    // Check reset reason and prepare for first connection
+    if (reset_reason == ESP_RST_POWERON || reset_reason == ESP_RST_SW || 
+        reset_reason == ESP_RST_PANIC || reset_reason == ESP_RST_UNKNOWN) {
+        logSystemEvent("SYSTEM", "First boot detected - preparing for stable BLE connection");
+        
+        // Reset BLE health for first connection
+        bleHealth.isConnected = false;
+        bleHealth.connectionStable = false;
+        bleHealth.indicationFailureCount = 0;
+        bleHealth.totalIndicationsSent = 0;
+        bleHealth.connectionTime = 0;
+        bleHealth.lastSuccessfulIndication = 0;
+    }
     // Create Core 0 tasks (Hardware Interface)
     xTaskCreatePinnedToCore(SystemManagerTask, "SystemMgr", 8192, NULL, 5,
                            &systemManagerTaskHandle, CORE_HARDWARE);
@@ -721,7 +792,7 @@ void ButtonManagerTask(void* pvParameters) {
     }
 }
 
-// COMPLETELY REWRITTEN: Hardware Task - Fixed race condition
+// COMPLETELY REWRITTEN: Hardware Task - Fixed race condit// COMPLETELY REWRITTEN: Hardware Task - Fixed race condition
 void HardwareTask(void* pvParameters) {
     logSystemEvent("HARDWARE", "Hardware Task started on Core 0");
     
@@ -743,87 +814,139 @@ void HardwareTask(void* pvParameters) {
             String buttonMessage = "Processing button event in state: " + String(getStateName(currentState));
             logSystemEvent("BUTTON", buttonMessage.c_str());
             
-            SystemEventMsg_t systemEvent = {
-                .param1 = buttonEvent.duration,
-                .param2 = 0,
-                .timestamp = buttonEvent.timestamp
-            };
-            
-            // Determine system event based on current state and button press
-            bool sendSystemEvent = true;
+            // Determine target state based on button press
+            bool shouldTransition = true;
+            bool shouldSendBLE = true;  // NEW: Control BLE sending
             SystemState_t targetState = STATE_MAX;
             
             if (buttonEvent.isLongPress) {
-                systemEvent.event = EVENT_BUTTON_LONG_PRESS;
-                
                 switch (currentState) {
                     case STATE_LOGIN:
                         targetState = STATE_UNLOCK;
-                        strcpy(systemEvent.data, "ButtonLongPress_Login_To_Unlock");
-                        logSystemEvent("BUTTON", "LOGIN → UNLOCK via long press");
                         break;
-                        
                     case STATE_RECORDING:
                         targetState = STATE_UPLOADING;
-                        strcpy(systemEvent.data, "ButtonLongPress_Recording_To_Upload");
-                        logSystemEvent("BUTTON", "RECORDING → UPLOADING via long press");
+                        // Reset Hold To Upload flag for long press
+                        if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10))) {
+                            systemStatus.isRecordingHoldToUpload = false;
+                            xSemaphoreGive(stateMutex);
+                        }
+                        xTimerStop(holdToUploadTimer, 0);  // Stop the timer
                         break;
+                    case STATE_LOGO:
+                    {
+                        // SIMPLIFIED: Remove complex debouncing that causes issues
+                        targetState = STATE_LOGO;       // Stay in LOGO state
+                        shouldTransition = false;       // No state transition
+                        shouldSendBLE = false;         // No BLE burst
                         
+                        // Stop logo switching
+                        xTimerStop(logoSwitchTimer, 0);
+                        
+                        // Simple cleanup: just hide any existing popup
+                        sendUICommandEnhanced(UI_CMD_HIDE_POPUP, STATE_LOGO, "", 0, true, true);
+                        
+                        // Small delay
+                        vTaskDelay(pdMS_TO_TICKS(20));
+                        
+                        // Check BLE connection and show message
+                        bool isConnected = isBLEConnected();
+                        const char* popupMessage = isConnected ? "Start the operation" : "Connect to the Phone";
+                        
+                        // Show popup
+                        sendUICommandEnhanced(UI_CMD_SHOW_POPUP, STATE_LOGO, popupMessage, 0, true, true);
+                        
+                        // Stop any existing popup timer and start new one
+                        xTimerStop(logoPopupTimer, 0);
+                        xTimerReset(logoPopupTimer, 0);
+                        
+                        logSystemEvent("BUTTON", String("📱 Button press in LOGO: " + String(popupMessage)).c_str());
+                        break;
+                    }
                     default:
-                        String invalidLongMessage = "Invalid long press in state: " + String(getStateName(currentState));
-                        logSystemEvent("BUTTON", invalidLongMessage.c_str());
-                        sendSystemEvent = false;
+                        shouldTransition = false;
+                        shouldSendBLE = false;
                         break;
                 }
             } else {
-                systemEvent.event = EVENT_BUTTON_SHORT_PRESS;
-                
+                // SHORT PRESS handling
                 switch (currentState) {
                     case STATE_UNLOCK:
                         targetState = STATE_RECORDING;
-                        strcpy(systemEvent.data, "ButtonShortPress_Unlock_To_Recording");
-                        logSystemEvent("BUTTON", "UNLOCK → RECORDING via short press");
                         break;
-
-                    case STATE_RECORDING:  // MODIFIED CASE
-                        // Stay in same state but change UI
-                        targetState = STATE_RECORDING;
-                        strcpy(systemEvent.data, "ButtonShortPress_Recording_ShowHoldToUpload");
-                        logSystemEvent("BUTTON", "RECORDING → Show Hold To Upload UI via short press");
+                    case STATE_RECORDING:
+                        // CRITICAL FIX: Show Hold To Upload UI but DON'T transition or send BLE
+                        targetState = STATE_RECORDING;  // Stay in same state
+                        shouldTransition = false;       // No state transition
+                        shouldSendBLE = false;         // No BLE burst!
                         
-                        // Set the flag to show Hold To Upload UI
+                        // Show Hold To Upload UI
                         if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10))) {
                             systemStatus.isRecordingHoldToUpload = true;
                             xSemaphoreGive(stateMutex);
                         }
-            break;
+                        
+                        // Start timer to auto-hide message after 4 seconds
+                        xTimerReset(holdToUploadTimer, 0);
+                        
+                        // Update UI immediately to show help message
+                        sendUICommandEnhanced(UI_CMD_LOAD_SCREEN, STATE_RECORDING, "Hold To Upload", 0, true, true);
+                        
+                        logSystemEvent("BUTTON", "📱 Short press in RECORDING - Showing Hold To Upload help (NO BLE sent)");
+                        break;
+                    case STATE_LOGO:
+                        {
+                            // NEW: Handle button press in LOGO state
+                            targetState = STATE_LOGO;       // Stay in LOGO state
+                            shouldTransition = false;       // No state transition
+                            shouldSendBLE = false;         // No BLE burst
+                            
+                            // Stop logo switching while showing popup
+                            xTimerStop(logoSwitchTimer, 0);
+                            
+                            // Check BLE connection status and show appropriate message
+                            bool isConnected = isBLEConnected();
+                            const char* popupMessage = isConnected ? "Start the operation" : "Connect to the Phone";
+                            
+                            // Show notification popup
+                            sendUICommandEnhanced(UI_CMD_SHOW_POPUP, STATE_LOGO, popupMessage, 0, true, true);
+                            
+                            // Start timer to auto-hide popup after 3 seconds
+                            xTimerReset(logoPopupTimer, 0);
+                            
+                            logSystemEvent("BUTTON", String("📱 Button press in LOGO - Showing notification: " + String(popupMessage)).c_str());
+                            break;
+                        }
                     default:
-                        String invalidShortMessage = "Invalid short press in state: " + String(getStateName(currentState));
-                        logSystemEvent("BUTTON", invalidShortMessage.c_str());
-                        sendSystemEvent = false;
+                        shouldTransition = false;
+                        shouldSendBLE = false;
                         break;
                 }
             }
             
-            // CRITICAL FIX: Send system event FIRST, then BLE indication AFTER state change
-            if (sendSystemEvent && targetState != STATE_MAX) {
-                systemEvent.targetState = targetState;
+            // Send BLE burst and transition ONLY if both flags are true
+            if (shouldTransition && shouldSendBLE && targetState != STATE_MAX) {
+                // Send BLE burst BEFORE state transition (your 3x algorithm)
+                logSystemEvent("BLE", "Sending BLE burst BEFORE state transition");
                 
-                // Send system event for immediate state transition
+                // Send burst without triggering state change yet
+                sendBLEButtonIndicationBurstNoTransition(currentState, 3, 30);
+                
+                // Small delay to ensure all BLE indications are sent
+                vTaskDelay(pdMS_TO_TICKS(100));
+                
+                // NOW do the state transition
+                SystemEventMsg_t systemEvent = {
+                    .event = buttonEvent.isLongPress ? EVENT_BUTTON_LONG_PRESS : EVENT_BUTTON_SHORT_PRESS,
+                    .targetState = targetState,
+                    .param1 = buttonEvent.duration,
+                    .param2 = 0,
+                    .timestamp = buttonEvent.timestamp
+                };
+                
                 if (xQueueSend(systemEventQueue, &systemEvent, pdMS_TO_TICKS(100)) == pdPASS) {
-                    String buttonSuccessMessage = "✅ System event sent for: " + String(getStateName(targetState));
-                    logSystemEvent("BUTTON", buttonSuccessMessage.c_str());
-                    
-                    // Wait for state transition to complete (small delay)
-                    vTaskDelay(pdMS_TO_TICKS(50));
-                    
-                    // NOW send BLE indication after state has changed
-                    String bleIndicationMessage = "Sending BLE indication AFTER state change to: " + String(getStateName(targetState));
-                    logSystemEvent("BLE", bleIndicationMessage.c_str());
-                    // 3 بار ارسال، فاصله 30ms، و سرکوب واکنش‌های eco اپ
-                    sendBLEButtonIndicationBurst(targetState, 3, 30, true);
-
-                    
+                    String successMessage = "✅ State transition queued after BLE burst: " + String(getStateName(targetState));
+                    logSystemEvent("BUTTON", successMessage.c_str());
                 } else {
                     logSystemEvent("ERROR", "❌ Failed to send system event from button");
                 }
@@ -1003,9 +1126,9 @@ void UIManagerTask(void* pvParameters) {
             logSystemEvent("UI", cmdMessage.c_str());
 
             if (xSemaphoreTake(displayMutex, pdMS_TO_TICKS(200))) {
-                switch (uiMsg.command) {
+               switch (uiMsg.command) {
                     case UI_CMD_LOAD_SCREEN:
-                        // CRITICAL FIX: Remove skip logic for force refresh or different states
+                        // ... existing LOAD_SCREEN code stays the same ...
                         if (uiMsg.forceRefresh || uiMsg.state != lastDisplayedState || uiMsg.highPriority) {
                             loadScreen(uiMsg.state);
                             lastDisplayedState = uiMsg.state;
@@ -1034,6 +1157,7 @@ void UIManagerTask(void* pvParameters) {
                         break;
 
                     case UI_CMD_SHOW_MESSAGE:
+                        // ... existing SHOW_MESSAGE code stays the same ...
                         if (messageLabel) {
                             if (strlen(uiMsg.message) > 0) {
                                 lv_label_set_text(messageLabel, uiMsg.message);
@@ -1056,6 +1180,76 @@ void UIManagerTask(void* pvParameters) {
                                 }
                             } else {
                                 lv_obj_add_flag(messageLabel, LV_OBJ_FLAG_HIDDEN);
+                            }
+                        }
+                        break;
+
+                   case UI_CMD_SHOW_POPUP:
+                        // FIXED: Simple global popup management
+                        {
+                            logSystemEvent("UI", "🎯 Creating popup with global management");
+                            
+                            // Clean up any existing popup first
+                            if (popupActive && globalPopupContainer != nullptr) {
+                                lv_obj_del(globalPopupContainer);
+                                globalPopupContainer = nullptr;
+                                globalPopupLabel = nullptr;
+                                popupActive = false;
+                                logSystemEvent("UI", "🗑️ Cleaned up existing popup");
+                            }
+                            
+                            // Only create new popup if message exists
+                            if (strlen(uiMsg.message) > 0) {
+                                // Create new popup container
+                                globalPopupContainer = lv_obj_create(lv_scr_act());
+                                if (globalPopupContainer != nullptr) {
+                                    lv_obj_set_size(globalPopupContainer, 200, 80);
+                                    lv_obj_align(globalPopupContainer, LV_ALIGN_CENTER, 0, 0);
+                                    lv_obj_set_style_bg_color(globalPopupContainer, lv_color_hex(0x000000), 0);
+                                    lv_obj_set_style_bg_opa(globalPopupContainer, LV_OPA_70, 0);
+                                    lv_obj_set_style_border_color(globalPopupContainer, lv_color_hex(0xFFFFFF), 0);
+                                    lv_obj_set_style_border_width(globalPopupContainer, 2, 0);
+                                    lv_obj_set_style_radius(globalPopupContainer, 10, 0);
+                                    
+                                    // Create label inside container
+                                    globalPopupLabel = lv_label_create(globalPopupContainer);
+                                    if (globalPopupLabel != nullptr) {
+                                        lv_obj_align(globalPopupLabel, LV_ALIGN_CENTER, 0, 0);
+                                        lv_obj_set_style_text_color(globalPopupLabel, lv_color_hex(0xFFFFFF), 0);
+                                        lv_obj_set_style_text_font(globalPopupLabel, &lv_font_montserrat_14, 0);
+                                        lv_obj_set_style_text_align(globalPopupLabel, LV_TEXT_ALIGN_CENTER, 0);
+                                        
+                                        // Set message
+                                        lv_label_set_text(globalPopupLabel, uiMsg.message);
+                                        
+                                        popupActive = true;
+                                        logSystemEvent("UI", String("✅ Popup created successfully: " + String(uiMsg.message)).c_str());
+                                    } else {
+                                        // Failed to create label, clean up container
+                                        lv_obj_del(globalPopupContainer);
+                                        globalPopupContainer = nullptr;
+                                        logSystemEvent("ERROR", "❌ Failed to create popup label");
+                                    }
+                                } else {
+                                    logSystemEvent("ERROR", "❌ Failed to create popup container");
+                                }
+                            }
+                        }
+                        break;
+
+                    case UI_CMD_HIDE_POPUP:
+                        // FIXED: Simple global popup cleanup
+                        {
+                            logSystemEvent("UI", "🎯 Hiding popup with global management");
+                            
+                            if (popupActive && globalPopupContainer != nullptr) {
+                                lv_obj_del(globalPopupContainer);
+                                globalPopupContainer = nullptr;
+                                globalPopupLabel = nullptr;
+                                popupActive = false;
+                                logSystemEvent("UI", "✅ Popup hidden successfully");
+                            } else {
+                                logSystemEvent("UI", "⚠️ No active popup to hide");
                             }
                         }
                         break;
@@ -1119,6 +1313,27 @@ void UIManagerTask(void* pvParameters) {
 // STATE MACHINE IMPLEMENTATION
 //========================================================================================
 
+void logoPopupTimerCallback(TimerHandle_t xTimer) {
+    logSystemEvent("TIMER", "Logo popup timeout - hiding notification");
+    
+    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50))) {
+        if (systemStatus.currentState == STATE_LOGO) {
+            xSemaphoreGive(stateMutex);
+            
+            // Simple hide command
+            sendUICommandEnhanced(UI_CMD_HIDE_POPUP, STATE_LOGO, "", 0, true, true);
+            
+            // Wait a bit then resume logo switching
+            vTaskDelay(pdMS_TO_TICKS(50));
+            xTimerReset(logoSwitchTimer, 0);
+            
+            logSystemEvent("UI", "🔄 Logo switching resumed");
+        } else {
+            xSemaphoreGive(stateMutex);
+        }
+    }
+}
+
 // ENHANCED: transitionToState with force UI refresh
 bool transitionToState(SystemState_t newState, SystemEvent_t trigger) {
     if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100))) {
@@ -1173,9 +1388,41 @@ bool transitionToState(SystemState_t newState, SystemEvent_t trigger) {
     return false;
 }
 
+void holdToUploadTimerCallback(TimerHandle_t xTimer) {
+    logSystemEvent("TIMER", "Hold To Upload message timeout - returning to normal recording UI");
+    
+    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100))) {
+        // Only reset if we're still in RECORDING state
+        if (systemStatus.currentState == STATE_RECORDING) {
+            systemStatus.isRecordingHoldToUpload = false;
+            xSemaphoreGive(stateMutex);
+            
+            // Force refresh to show normal recording UI again
+            sendUICommandEnhanced(UI_CMD_LOAD_SCREEN, STATE_RECORDING, "Back to Recording", 0, true, true);
+        } else {
+            xSemaphoreGive(stateMutex);
+        }
+    }
+}
+
+
 void executeStateEntry(SystemState_t state) {
-            String enterMessage = "Entering state: " + String(getStateName(state));
-        logSystemEvent("STATE", enterMessage.c_str());
+    // Add a flag to prevent duplicate entry execution
+    static SystemState_t lastEnteredState = STATE_MAX;
+    static TickType_t lastEntryTime = 0;
+    TickType_t currentTime = xTaskGetTickCount();
+    
+    // Prevent duplicate entry within 500ms
+    if (state == lastEnteredState && (currentTime - lastEntryTime) < pdMS_TO_TICKS(500)) {
+        logSystemEvent("STATE", "Skipping duplicate state entry");
+        return;
+    }
+    
+    lastEnteredState = state;
+    lastEntryTime = currentTime;
+    
+    String enterMessage = "Entering state: " + String(getStateName(state));
+    logSystemEvent("STATE", enterMessage.c_str());
     
     switch (state) {
         case STATE_LOGO:
@@ -1216,9 +1463,9 @@ void executeStateEntry(SystemState_t state) {
             break;
 
         case STATE_RECORDING:
-            playBuzzer(100, 1);
+            playBuzzer(100, 1);  // Only plays once
             updateLEDs(state);
-            sendUICommand(UI_CMD_START_ANIMATION, state);
+            sendUICommand(UI_CMD_START_ANIMATION, state);  // Only updates UI once
             break;
 
         case STATE_UPLOADING:
@@ -1249,14 +1496,28 @@ void executeStateExit(SystemState_t state) {
     
     switch (state) {
         case STATE_LOGO:
+        // Simple cleanup
         xTimerStop(logoSwitchTimer, 0);
+        xTimerStop(logoPopupTimer, 0);
+        
+        // Clean up any active popup
+        if (popupActive && globalPopupContainer != nullptr) {
+            sendUICommandEnhanced(UI_CMD_HIDE_POPUP, STATE_LOGO, "", 0, true, true);
+            vTaskDelay(pdMS_TO_TICKS(30)); // Short wait for cleanup
+        }
+        
+        logSystemEvent("STATE", "🧹 LOGO cleanup completed");
         break;
         case STATE_RECORDING:
+            sendUICommand(UI_CMD_STOP_ANIMATION, state);
+            // Stop Hold To Upload timer when leaving RECORDING state
+            xTimerStop(holdToUploadTimer, 0);
+            break;
+                
         case STATE_UPLOADING:
             sendUICommand(UI_CMD_STOP_ANIMATION, state);
             break;
             
-        // ADD THIS CASE:
         case STATE_LOGIN:
             // Stop the login screen timer when leaving LOGIN state
             xTimerStop(loginScreenTimer, 0);
@@ -1266,7 +1527,6 @@ void executeStateExit(SystemState_t state) {
             break;
     }
 }
-
 uint32_t getStateTimeout(SystemState_t state) {
     switch (state) {
         case STATE_SETUP:
@@ -1359,27 +1619,70 @@ void initializeHardware() {
 }
 
 void initializeBLE() {
-    logSystemEvent("BLE", "Initializing BLE...");
+    logSystemEvent("BLE", "Initializing BLE stack...");
     
+    // CRITICAL: Add delay after hardware reset
+    esp_reset_reason_t reset_reason = esp_reset_reason();
+    if (reset_reason == ESP_RST_POWERON || reset_reason == ESP_RST_SW || 
+        reset_reason == ESP_RST_PANIC || reset_reason == ESP_RST_UNKNOWN) {
+        logSystemEvent("BLE", "First boot after reset - Adding BLE stack stabilization delay");
+        vTaskDelay(pdMS_TO_TICKS(2000)); // 2 second delay for BLE stack initialization
+    }
+    
+    // Initialize BLE device
     BLEDevice::init("P2CAM_v2");
-
+    
+    // CRITICAL: Wait for BLE stack to fully initialize
+    vTaskDelay(pdMS_TO_TICKS(500)); 
+    logSystemEvent("BLE", "BLE device initialized, waiting for stack stabilization...");
+    
+    // Create server and set callbacks
     BLEServer* pServer = BLEDevice::createServer();
     pServer->setCallbacks(new SystemBLEServerCallbacks());
-
+    
+    // Setup services and characteristics
     setupBLEServices(pServer);
-
-    // Start advertising
+    
+    // CRITICAL: Wait for services to be fully registered
+    vTaskDelay(pdMS_TO_TICKS(300));
+    logSystemEvent("BLE", "BLE services registered, verifying readiness...");
+    
+    // Verify all services are properly created
+    bool servicesReady = true;
+    for (int i = 0; i < BLE_CHAR_COUNT; i++) {
+        if (bleCharacteristics[i].characteristic == nullptr) {
+            servicesReady = false;
+            logSystemEvent("ERROR", String("BLE characteristic " + String(i) + " not ready").c_str());
+            break;
+        }
+    }
+    
+    if (!servicesReady) {
+        logSystemEvent("ERROR", "BLE services not ready - adding extra delay");
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    
+    // Configure advertising
     BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
     pAdvertising->addServiceUUID("19b10000-e8f2-537e-4f6c-d104768a1214");
     pAdvertising->addServiceUUID("19b20000-e8f2-537e-4f6c-d104768a1214");
     pAdvertising->setScanResponse(true);
     pAdvertising->setMinPreferred(0x06);
     pAdvertising->setMaxPreferred(0x12);
-
+    
+    // CRITICAL: Start advertising with verification
+    logSystemEvent("BLE", "Starting BLE advertising...");
     BLEDevice::startAdvertising();
+    
+    // Verify advertising started successfully
+    // Wait for advertising to stabilize
+    vTaskDelay(pdMS_TO_TICKS(200));
+    logSystemEvent("BLE", "✅ BLE initialized and advertising successfully");
 
-    logSystemEvent("BLE", "BLE initialized and advertising started");
-}
+    // Mark BLE as ready for first connection
+    bleHealth.connectionStable = true; // Mark as ready for connections
+    bleHealth.indicationFailureCount = 0;
+    }   
 
 void initializeDisplay() {
     logSystemEvent("DISPLAY", "Initializing display...");
@@ -1446,6 +1749,114 @@ void setupBLEServices(BLEServer* pServer) {
     service1->start();
     service2->start();
 }
+
+
+// NEW: Send BLE burst without transitioning state
+void sendBLEButtonIndicationBurstNoTransition(SystemState_t currentState, int repeats, int spacing_ms) {
+    logSystemEvent("BLE", "Starting BLE burst (no transition)");
+    
+    // Check if this is first connection after reset
+    bool isFirstConnection = (bleHealth.totalIndicationsSent == 0);
+    
+    if (!isBLEConnectionStable()) {
+        logSystemEvent("BLE", "Connection not stable, waiting...");
+        
+        // Wait longer for first connection after reset
+        int maxWaitIterations = isFirstConnection ? 30 : 20; // 3s vs 2s
+        
+        for (int i = 0; i < maxWaitIterations; i++) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            if (isBLEConnectionStable()) {
+                logSystemEvent("BLE", "Connection now stable");
+                break;
+            }
+        }
+        
+        // If still not stable, increase retries for first connection
+        if (!isBLEConnectionStable()) {
+            if (isFirstConnection) {
+                logSystemEvent("BLE", "First connection still unstable, using maximum retries");
+                repeats = 7; // Maximum retries for first connection
+                spacing_ms = 50; // Longer delays between attempts
+            } else {
+                logSystemEvent("BLE", "Connection still unstable, increasing retries");
+                repeats = 5;
+            }
+        }
+    }
+    
+    // Add extra delay for very first indication after reset
+    if (isFirstConnection) {
+        logSystemEvent("BLE", "First indication after reset, adding extra stabilization delay");
+        vTaskDelay(pdMS_TO_TICKS(500)); // Extra 500ms delay for first indication
+    }
+
+    // Determine which indication to send based on CURRENT state
+    SystemState_t indicationState = STATE_MAX;
+    
+    // Map current state to the indication we need to send
+    switch (currentState) {
+        case STATE_UNLOCK:
+            indicationState = STATE_RECORDING;  // Send "Record (Button)" indication
+            break;
+        case STATE_RECORDING:
+            indicationState = STATE_UPLOADING;  // Send "Upload (Button)" indication
+            break;
+        case STATE_LOGIN:
+            indicationState = STATE_UNLOCK;     // Send "Unlock (Button)" indication
+            break;
+        default:
+            logSystemEvent("BLE", "No indication mapping for current state");
+            return;
+    }
+    static bool firstIndicationAfterReset = true;
+    if (firstIndicationAfterReset) {
+        logSystemEvent("BLE", "First indication after reset, adding extra delay");
+        vTaskDelay(pdMS_TO_TICKS(300)); // Extra 300ms delay
+        firstIndicationAfterReset = false;
+    }
+    
+    // Send multiple indications without suppressing app responses
+    for (int i = 0; i < repeats; i++) {
+        // Send indication for the TARGET state (where we're going)
+        sendBLEButtonIndicationOnly(indicationState);
+        
+        if (i < repeats - 1) {
+            vTaskDelay(pdMS_TO_TICKS(spacing_ms));
+        }
+    }
+    
+    logSystemEvent("BLE", "BLE burst complete");
+}
+
+// NEW: Send only BLE indication without any state change
+void sendBLEButtonIndicationOnly(SystemState_t targetState) {
+    if (xSemaphoreTake(bleMutex, pdMS_TO_TICKS(200))) {
+        for (int i = 0; i < BLE_CHAR_COUNT; i++) {
+            if (bleCharacteristics[i].associatedState == targetState &&
+                (bleCharacteristics[i].properties & BLECharacteristic::PROPERTY_INDICATE) &&
+                bleCharacteristics[i].characteristic != nullptr &&
+                !bleCharacteristics[i].indicationMessage.isEmpty()) {
+                
+                try {
+                    bleCharacteristics[i].characteristic->setValue(
+                        bleCharacteristics[i].indicationMessage.c_str()
+                    );
+                    bleCharacteristics[i].characteristic->indicate();
+                    
+                    String msg = "📡 Sent indication: '" + bleCharacteristics[i].indicationMessage + "'";
+                    logSystemEvent("BLE", msg.c_str());
+                } catch (...) {
+                    logSystemEvent("ERROR", "Failed to send indication");
+                }
+                
+                break;
+            }
+        }
+        xSemaphoreGive(bleMutex);
+    }
+}
+
 
 // ENHANCED: sendBLEButtonIndication with ROBUST RETRY MECHANISM
 void sendBLEButtonIndication(SystemState_t state) {
@@ -1591,10 +2002,28 @@ bool isBLEConnectionStable() {
     TickType_t currentTime = xTaskGetTickCount();
     TickType_t connectionAge = currentTime - bleHealth.connectionTime;
     
-    // Consider connection stable after 2 seconds AND if we haven't had recent failures
-    return (connectionAge > pdMS_TO_TICKS(2000)) && 
-           (bleHealth.indicationFailureCount < 3) &&
-           bleHealth.connectionStable;
+    // Check if this is first connection after reset
+    esp_reset_reason_t reset_reason = esp_reset_reason();
+    bool isFirstConnection = (bleHealth.totalIndicationsSent == 0) &&
+                           (reset_reason == ESP_RST_POWERON || reset_reason == ESP_RST_SW || 
+                            reset_reason == ESP_RST_PANIC || reset_reason == ESP_RST_UNKNOWN);
+    
+    if (isFirstConnection) {
+        // For first connection, require longer stabilization time
+        bool stableByTime = (connectionAge > pdMS_TO_TICKS(2000)); // 2 seconds for first
+        bool stableByHealth = (bleHealth.indicationFailureCount < 2);
+        bool markedStable = bleHealth.connectionStable;
+        
+        logSystemEvent("BLE", String("First connection stability check - Time: " + String(stableByTime) + 
+                      ", Health: " + String(stableByHealth) + ", Marked: " + String(markedStable)).c_str());
+        
+        return stableByTime && stableByHealth && markedStable;
+    } else {
+        // Normal connection stability check (existing logic)
+        return (connectionAge > pdMS_TO_TICKS(3000)) && 
+               (bleHealth.indicationFailureCount < 3) &&
+               bleHealth.connectionStable;
+    }
 }
 
 void updateBLEConnectionHealth(bool indicationSuccess) {
@@ -1740,6 +2169,25 @@ void loadScreen(SystemState_t state) {
             break;
     }
 }
+
+void resetPopupSystem() {
+    // Stop timers
+    xTimerStop(logoPopupTimer, 0);
+    
+    // Clean up global popup state
+    if (popupActive) {
+        sendUICommandEnhanced(UI_CMD_HIDE_POPUP, STATE_LOGO, "", 0, true, true);
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    
+    // Reset global variables
+    globalPopupContainer = nullptr;
+    globalPopupLabel = nullptr;
+    popupActive = false;
+    
+    logSystemEvent("UI", "🔄 Popup system completely reset");
+}
+
 
 void showMessage(const char* message, uint16_t duration, bool isError) {
     sendUICommand(UI_CMD_SHOW_MESSAGE, STATE_MAX, message, duration);
