@@ -1,0 +1,19 @@
+### Footprint positions - created on 2025-07-29T10:29:22+0200 ###
+### Printed by KiCad version 8.0.5
+## Unit = mm, Angle = deg.
+## Side : top
+# Ref     Val                     Package                                                PosX       PosY       Rot  Side
+C1        100u                    CP_Radial_D5.0mm_P2.50mm                           147.7200   -79.0900    0.0000  top
+D1        LED_Filled              LED_D3.0mm                                         136.1550   -92.0700    0.0000  top
+D2        LED_Filled              LED_D3.0mm                                         136.1550   -97.1500    0.0000  top
+D3        LED_Filled              LED_D3.0mm                                         136.1550   -94.6100  180.0000  top
+D4        LED_Filled              LED_D3.0mm                                         141.2350   -94.6100  180.0000  top
+J2        Conn_01x02_MountingPin  PinHeader_1x02_P2.54mm_Vertical                    147.8800   -97.3000   90.0000  top
+J3        Conn_01x02_MountingPin  PinHeader_1x02_P2.54mm_Vertical                    125.2000   -95.3750    0.0000  top
+R1        120K                    R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal   144.5500   -86.6600   90.0000  top
+R2        15.1K                   R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal   144.5100   -97.1800   90.0000  top
+R3        5.1K                    R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal   141.5100   -86.6300   90.0000  top
+R4        100                     R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal   130.3800   -88.4700  -90.0000  top
+U1        NE555P                  DIP-8_W7.62mm                                      136.6800   -78.6700  -90.0000  top
+U2        L78L06_TO92             TO-92L_Inline                                      125.9400   -89.5400  -90.0000  top
+## End
