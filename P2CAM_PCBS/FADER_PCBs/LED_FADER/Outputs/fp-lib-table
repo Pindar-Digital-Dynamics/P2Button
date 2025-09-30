@@ -1,0 +1,4 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "UP20-C-F-G-FL-1-P12-TR")(type "KiCad")(uri "${KIPRJMOD}/LIBS/UP20-C-F-G-FL-1-P12-TR.pretty")(options "")(descr ""))
+)

@@ -1,0 +1,11 @@
+Ref,Val,Package,PosX,PosY,Rot,Side
+"C1","100u","CP_Radial_D5.0mm_P2.50mm",149.590000,-98.010000,90.000000,top
+"D1","LED_Filled","LED_D10.0mm",136.400000,-112.310000,0.000000,top
+"J2","Conn_01x02_MountingPin","PinHeader_1x02_P2.54mm_Vertical",150.280000,-112.665000,0.000000,top
+"J3","Conn_01x02_MountingPin","PinHeader_1x02_P2.54mm_Vertical",125.110000,-112.705000,0.000000,top
+"R1","120K","R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal",145.490000,-116.040000,90.000000,top
+"R2","15.1K","R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal",146.860000,-104.610000,180.000000,top
+"R3","5.1K","R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal",139.220000,-101.470000,0.000000,top
+"R4","100","R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal",130.110000,-108.440000,-90.000000,top
+"U1","NE555P","DIP-8_W7.62mm",136.960000,-103.330000,180.000000,top
+"U2","L78L06_TO92","TO-92L_Inline",125.780000,-106.780000,-90.000000,top
