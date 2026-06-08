@@ -1,0 +1,41 @@
+/*
+ * P2Button OTA — ECDSA P-256 firmware-signing public key.
+ *
+ * Embedded in factory firmware. Used by ota.cpp::verifyFirmwareSignature() to
+ * validate that the .bin being installed was signed by Pindar's offline key.
+ *
+ * Corresponds to mobile app constant at:
+ *   App/p2cam-frontend/src/constant/signing.ts (P2BUTTON_SIGNING_PUBLIC_KEY_PEM)
+ *
+ * Private key location (offline, on MoSaleh's Mac, GPG-encrypted):
+ *   ~/.p2cam-secrets/p2button-signing.pem.gpg
+ *
+ * Sprint reference: v6 SUPER PLAN T22.3 (DO Spaces + ECDSA P-256 signing key).
+ * Generated: 2026-06-08.
+ *
+ * Format: SubjectPublicKeyInfo DER encoding (RFC 5280 §4.1), 91 bytes.
+ * For verification with mbedTLS:
+ *   mbedtls_pk_parse_public_key(&pk, P2BUTTON_SIGNING_PUBLIC_KEY_DER,
+ *                                P2BUTTON_SIGNING_PUBLIC_KEY_DER_LEN);
+ */
+#pragma once
+
+#include <stddef.h>
+#include <stdint.h>
+
+/* ECDSA P-256 public key (SubjectPublicKeyInfo DER, 91 bytes) */
+static const uint8_t P2BUTTON_SIGNING_PUBLIC_KEY_DER[] = {
+    0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02,
+    0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03,
+    0x42, 0x00, 0x04, 0xad, 0x6e, 0x89, 0x21, 0x34, 0x53, 0xc2, 0x88, 0xfb,
+    0x53, 0xbe, 0x7c, 0x01, 0xc0, 0xa8, 0xf9, 0xfd, 0x14, 0xfc, 0x47, 0xf2,
+    0xfe, 0x09, 0x99, 0x6d, 0x14, 0xbf, 0xdf, 0x5a, 0x02, 0xd3, 0x85, 0xb8,
+    0x87, 0x48, 0x4a, 0x80, 0x39, 0x42, 0x5c, 0xb3, 0xdc, 0x76, 0x62, 0x0d,
+    0x6c, 0x33, 0x92, 0xe5, 0x41, 0xf9, 0xd5, 0xa6, 0x54, 0xf9, 0x9c, 0x14,
+    0x91, 0x3b, 0x67, 0x09, 0xf3, 0xa9, 0x3d
+};
+
+static const size_t P2BUTTON_SIGNING_PUBLIC_KEY_DER_LEN = 91;
+
+#define P2BUTTON_SIGNATURE_ALGORITHM "ECDSA-P256-SHA256"
+#define P2BUTTON_SIGNATURE_FORMAT    "IEEE_P1363"  /* raw r||s, 64 bytes */
